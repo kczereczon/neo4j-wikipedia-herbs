@@ -1,7 +1,8 @@
 const https = require('https')
 const cheerio = require('cheerio');
 
-const neo4j = require('neo4j-driver')
+const neo4j = require('neo4j-driver');
+const { type } = require('os');
 
 const stopWords = [
     'ancient Greece',
@@ -38,6 +39,12 @@ const bioTags = [
     "Subfamily",
     "Tribe",
     "Genus"
+]
+
+const nodeTypes = [
+    ...bioTags,
+    "Herb",
+    "Disease"
 ]
 
 var herbs = {};
@@ -134,15 +141,15 @@ async function request(options) {
                 if (i == 0) {
                     if (bioTags.includes(text)) {
                         info.tag = text
-                        console.log(text);
+                        // console.log(text);
                     }
                 }
                 if (i == 1) {
                     if (info.tag) {
-                        info.value = text;
-                        if (infos[infos.length - 1]) {
-                            info.related.push({ name: 'included_in', value: infos[infos.length - 1].value, tag: infos[infos.length - 1].tag });
-                        }
+                        info.value = text.toLocaleLowerCase().trim();
+                        // if (infos[infos.length - 1]) {
+                        //     info.related.push({ name: 'included_in', value: infos[infos.length - 1].value, tag: infos[infos.length - 1].tag });
+                        // }
                         // infos.forEach(element => {
                         //     info.related.push({ name: 'included_in', value: element.value, tag: element.tag });
                         // });
@@ -203,6 +210,18 @@ async function request(options) {
 
     const driver = neo4j.driver("bolt://neo4j:7687", neo4j.auth.basic('neo4j', "password"));
 
+    var session = driver.session();
+    try {
+        const result = await session.run(
+            `MATCH (n) DETACH DELETE n`
+        )
+
+    } catch (err) {
+        console.error(err);
+    } finally {
+        await session.close()
+    }
+
     for (let index = 0; index < Object.keys(herbs).length; index++) {
         const herb = herbs[Object.keys(herbs)[index]];
         // console.log(herb);
@@ -220,7 +239,7 @@ async function request(options) {
             await session.close()
         }
 
-        asyncForEach(herb.effects, async effect => {
+        await asyncForEach(herb.effects, async effect => {
             var session = driver.session();
 
             try {
@@ -234,10 +253,10 @@ async function request(options) {
                 await session.close()
             }
 
-            var session = driver.session();
+            var session2 = driver.session();
 
             try {
-                const result = await session.run(
+                const result = await session2.run(
                     `MATCH
                         (a:Herb),
                         (b:Disease)
@@ -250,11 +269,11 @@ async function request(options) {
             } catch (err) {
                 console.error(err);
             } finally {
-                await session.close()
+                await session2.close()
             }
         })
 
-        asyncForEach(herb.adverseEffect, async effect => {
+        await asyncForEach(herb.adverseEffect, async effect => {
             var session = driver.session();
 
             try {
@@ -268,10 +287,10 @@ async function request(options) {
                 await session.close()
             }
 
-            var session = driver.session();
+            var session2 = driver.session();
 
             try {
-                const result = await session.run(
+                const result = await session2.run(
                     `MATCH
                         (a:Herb),
                         (b:Disease)
@@ -284,40 +303,52 @@ async function request(options) {
             } catch (err) {
                 console.error(err);
             } finally {
-                await session.close()
+                await session2.close()
             }
         })
 
-        asyncForEach(herb.infos, async (info, index) => {
-            var session = driver.session();
-
-            // try {
-            //     const result = await session.run(
-            //         `MERGE (a:${info.tag} {name: $value}) RETURN a`,
-            //         { value: info.value.trim(), tag: info.tag },
-            //     )
-            // } catch (err) {
-            //     console.error(err);
-            // } finally {
-            //     await session.close()
-            // }
-
-            var session = driver.session();
-
-            if (info.value.substring(0, 4) == "Plan") {
-                console.log(info);
+        await asyncForEach(herb.infos, async (info, index2) => {
+            if (index2 > 0) {
+                var session = driver.session();
+                try {
+                    const result = await session.run(
+                        `MATCH (b:${herb.infos[index2 - 1].tag.trim()} {name: $value})
+                        MERGE (a:${info.tag.trim()} {name: $parentValue})
+                        CREATE UNIQUE  (a)-[r:included_in]->(b)
+                        RETURN type(r)`,
+                        {
+                            value: herb.infos[index2 - 1].value.trim(),
+                            tag: herb.infos[index2 - 1].tag,
+                            parentValue: info.value.trim(),
+                            parentTag: info.tag
+                        },
+                    )
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    await session.close()
+                }
+            } else {
+                var session = driver.session();
+                try {
+                    const result = await session.run(
+                        `MERGE (a:${info.tag.trim()} {name: "${info.value.trim()}"}) RETURN a`
+                    )
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    await session.close()
+                }
             }
 
             if (info == herb.infos[herb.infos.length - 1]) {
-
+                var session = driver.session();
                 try {
                     const result = await session.run(
-                    `MATCH
-                        (a:Herb),
-                        (b:${info.tag})
-                    WHERE a.name = $herbName AND b.name = $value
-                    MERGE  (a)-[r:included_in]->(b)
-                    ON CREATE SET b.created = ${index}
+                        `MATCH
+                        (a:Herb {name: $herbName})
+                    MATCH (b:${info.tag} {name: $value})
+                    MERGE (a)-[r:included_in]->(b)
                     RETURN type(r)`,
                         { herbName: herb.latin, value: info.value.trim(), tag: info.tag },
                     )
@@ -328,33 +359,28 @@ async function request(options) {
                     await session.close()
                 }
             }
-
-            if (index > 0) {
-
-                var session = driver.session();
-                try {
-                    const result = await session.run(
-                        `MATCH
-                            (a:${herb.infos[index - 1].tag} {name: $value}),
-                            (b:${info.tag} {name: $parentValue})
-                        MERGE (b)-[r:included_in]->(a)
-                        ON CREATE SET b.created = ${index}, a.updated = ${index}
-                        RETURN type(r)`,
-                        {
-                            value: herb.infos[index - 1].value.trim(),
-                            tag: herb.infos[index - 1].tag,
-                            parentValue: info.value.trim(),
-                            parentTag: info.tag
-                        },
-                    )
-                } catch (err) {
-                    console.error(err);
-                } finally {
-                    await session.close()
-                }
-            }
         })
+
     }
+
+    await asyncForEach(nodeTypes, async type => {
+        var session = driver.session();
+        try {
+            const result = await session.run(
+                `match (n:${type}) 
+                WITH n.name AS name, COLLECT(n) AS branches
+                WHERE SIZE(branches) > 1
+                FOREACH (n IN TAIL(branches) | DETACH DELETE n);`
+            )
+            console.log("remove duplicates: ", type);
+
+        } catch (err) {
+            console.error(err);
+        } finally {
+            await session.close()
+        }
+
+    });
 
     // on application exit:
     await driver.close()
